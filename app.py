@@ -20,16 +20,27 @@ import aoti
 
 MODEL_ID = "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
 
+# الثوابت الرئيسية للأبعاد
 MAX_DIM = 832
 MIN_DIM = 480
 SQUARE_DIM = 640
 MULTIPLE_OF = 16
 
-MAX_SEED = np.iinfo(np.int32).max
+# الأبعاد المستهدفة لتناسب السوشيال ميديا (العرض/الارتفاع)
+ASPECT_RATIOS = {
+    "Auto": None,
+    "16:9 (Landscape)": 16/9,
+    "1:1 (Square)": 1/1,
+    "4:5 (Portrait)": 4/5,
+    "9:16 (Vertical)": 9/16,
+}
+DEFAULT_RATIO_KEY = list(ASPECT_RATIOS.keys())[0]
 
+
+MAX_SEED = np.iinfo(np.int32).max
 FIXED_FPS = 16
 MIN_FRAMES_MODEL = 8
-MAX_FRAMES_MODEL = 112 # القيمة الجديدة لـ 7 ثوانٍ (7 * 16 = 112)
+MAX_FRAMES_MODEL = 112 # تم التعديل ليكون الحد الأقصى 7 ثوانٍ (112 / 16 = 7.0)
 
 MIN_DURATION = round(MIN_FRAMES_MODEL/FIXED_FPS,1)
 MAX_DURATION = round(MAX_FRAMES_MODEL/FIXED_FPS,1)
@@ -77,46 +88,50 @@ aoti.aoti_blocks_load(pipe.transformer_2, 'zerogpu-aoti/Wan2', variant='fp8da')
 default_prompt_i2v = "make this image come alive, cinematic motion, smooth animation"
 default_negative_prompt = "blurry, low-res, low quality, bad anatomy, bad hands, missing limbs, extra fingers, mutated hands, deformed, disfigured, text, watermark, jpeg artifacts, tiling, duplicate, ugly"
 
-def resize_image(image: Image.Image) -> Image.Image:
+def resize_image(image: Image.Image, target_ratio_key: str = DEFAULT_RATIO_KEY) -> Image.Image:
     """
-    Resizes an image to fit within the model's constraints, preserving aspect ratio as much as possible.
+    Resizes and crops an image to fit the model's constraints and the target aspect ratio,
+    preserving aspect ratio as much as possible before final scaling.
     """
     width, height = image.size
-
-    # Handle square case
-    if width == height:
-        return image.resize((SQUARE_DIM, SQUARE_DIM), Image.LANCZOS)
-
-    aspect_ratio = width / height
-    
-    MAX_ASPECT_RATIO = MAX_DIM / MIN_DIM 
-    MIN_ASPECT_RATIO = MIN_DIM / MAX_DIM 
+    target_ratio = ASPECT_RATIOS.get(target_ratio_key)
 
     image_to_resize = image
     
-    if aspect_ratio > MAX_ASPECT_RATIO:
-        # Very wide image -> crop width to fit 832x480 aspect ratio
-        target_w, target_h = MAX_DIM, MIN_DIM
-        crop_width = int(round(height * MAX_ASPECT_RATIO))
-        left = (width - crop_width) // 2
-        image_to_resize = image.crop((left, 0, left + crop_width, height))
-    elif aspect_ratio < MIN_ASPECT_RATIO:
-        # Very tall image -> crop height to fit 480x832 aspect ratio
-        target_w, target_h = MIN_DIM, MAX_DIM
-        crop_height = int(round(width / MIN_ASPECT_RATIO))
-        top = (height - crop_height) // 2
-        image_to_resize = image.crop((0, top, width, top + crop_height))
-    else:
-        if width > height:  # Landscape
-            target_w = MAX_DIM
-            target_h = int(round(target_w / aspect_ratio))
-        else:  # Portrait
-            target_h = MAX_DIM
-            target_w = int(round(target_h * aspect_ratio))
+    # 1. تطبيق القص (Cropping) بناءً على النسبة المطلوبة
+    if target_ratio is not None:
+        current_ratio = width / height
+        
+        if current_ratio > target_ratio:
+            # الصورة أوسع مما يجب: قص العرض
+            crop_width = int(round(height * target_ratio))
+            left = (width - crop_width) // 2
+            image_to_resize = image.crop((left, 0, left + crop_width, height))
+            width, height = image_to_resize.size # تحديث الأبعاد
+        elif current_ratio < target_ratio:
+            # الصورة أطول مما يجب: قص الارتفاع
+            crop_height = int(round(width / target_ratio))
+            top = (height - crop_height) // 2
+            image_to_resize = image.crop((0, top, width, top + crop_height))
+            width, height = image_to_resize.size # تحديث الأبعاد
 
+    # 2. تحديد الأبعاد النهائية للنموذج (مع مراعاة قيود MIN/MAX DIM)
+    aspect_ratio = width / height
+    
+    if width == height: # مربع
+        target_w, target_h = SQUARE_DIM, SQUARE_DIM
+    elif aspect_ratio > 1: # أفقي (Landscape)
+        target_w = MAX_DIM
+        target_h = int(round(target_w / aspect_ratio))
+    else: # عمودي (Portrait)
+        target_h = MAX_DIM
+        target_w = int(round(target_h * aspect_ratio))
+    
+    # ضمان أن تكون الأبعاد مضاعفاً لـ MULTIPLE_OF
     final_w = round(target_w / MULTIPLE_OF) * MULTIPLE_OF
     final_h = round(target_h / MULTIPLE_OF) * MULTIPLE_OF
 
+    # ضمان أن تكون الأبعاد ضمن الحد الأدنى والأقصى
     final_w = max(MIN_DIM, min(MAX_DIM, final_w))
     final_h = max(MIN_DIM, min(MAX_DIM, final_h))
     
@@ -141,14 +156,15 @@ def get_duration(
     guidance_scale_2,
     seed,
     randomize_seed,
+    aspect_ratio_key, # تم إضافة النسبة
     progress,
 ):
     BASE_FRAMES_HEIGHT_WIDTH = 81 * 832 * 624
     BASE_STEP_DURATION = 15
     if input_image is None:
         return 0
-        
-    width, height = resize_image(input_image).size
+    # تمرير النسبة إلى دالة resize_image
+    width, height = resize_image(input_image, aspect_ratio_key).size
     frames = get_num_frames(duration_seconds)
     factor = frames * width * height / BASE_FRAMES_HEIGHT_WIDTH
     step_duration = BASE_STEP_DURATION * factor ** 1.5
@@ -165,11 +181,11 @@ def generate_video(
     guidance_scale_2 = 1,    
     seed = 42,
     randomize_seed = False,
+    aspect_ratio_key = DEFAULT_RATIO_KEY, # تم إضافة النسبة
     progress=gr.Progress(track_tqdm=True),
 ):
     """
     Generate a video from an input image using the Wan 2.2 14B I2V model with Lightning LoRA.
-    ... [وصف الدالة] ...
     """
     if input_image is None:
         raise gr.Error("Please upload an input image.")
@@ -178,7 +194,9 @@ def generate_video(
 
     num_frames = get_num_frames(duration_seconds)
     current_seed = random.randint(0, MAX_SEED) if randomize_seed else int(seed)
-    resized_image = resize_image(input_image)
+    
+    # تمرير النسبة إلى دالة resize_image
+    resized_image = resize_image(input_image, aspect_ratio_key)
 
     try:
         output_frames_list = pipe(
@@ -214,11 +232,13 @@ def generate_video(
     
     return video_path, current_seed
 
-def get_image_info(image):
+def get_image_info(image, aspect_ratio_key):
     if image is None:
-        return "", ""
-    resized_image = resize_image(image)
-    return f"{resized_image.width}x{resized_image.height}", resized_image.width, resized_image.height
+        return ""
+    # تمرير النسبة إلى دالة resize_image
+    resized_image = resize_image(image, aspect_ratio_key)
+    return f"{resized_image.width}x{resized_image.height}"
+
 
 with gr.Blocks() as demo:
     gr.Markdown("# Fast 4 steps Wan 2.2 I2V (14B) with Lightning LoRA")
@@ -227,9 +247,16 @@ with gr.Blocks() as demo:
         with gr.Column():
             input_image_component = gr.Image(type="pil", label="Input Image")
             
+            # إضافة قائمة منسدلة لنسبة العرض إلى الارتفاع
+            aspect_ratio_input = gr.Dropdown(
+                label="Target Aspect Ratio (Social Media Formats)",
+                choices=list(ASPECT_RATIOS.keys()),
+                value=DEFAULT_RATIO_KEY,
+                info="Crops the image to fit the selected social media ratio before generation."
+            )
+            
             image_dim_output = gr.Textbox(label="Target Dimensions (W x H)", value="", interactive=False)
             
-            # تم تعديل القيمة الافتراضية والحد الأقصى للمنظم لتشمل 7 ثوانٍ
             duration_seconds_input = gr.Slider(minimum=MIN_DURATION, maximum=MAX_DURATION, step=0.1, value=7.0, label="Duration (seconds)", info=f"Clamped to model's {MIN_FRAMES_MODEL}-{MAX_FRAMES_MODEL} frames at {FIXED_FPS}fps.")
             
             prompt_input = gr.Textbox(label="Prompt", value=default_prompt_i2v)
@@ -247,12 +274,16 @@ with gr.Blocks() as demo:
         with gr.Column():
             video_output = gr.Video(label="Generated Video", autoplay=True, interactive=False)
             
-    input_image_component.change(fn=get_image_info, inputs=[input_image_component], outputs=[image_dim_output])
+    
+    # ربط حدث تحميل الصورة أو تغيير نسبة الأبعاد بعرض الأبعاد المستهدفة
+    input_image_component.change(fn=get_image_info, inputs=[input_image_component, aspect_ratio_input], outputs=[image_dim_output], queue=False)
+    aspect_ratio_input.change(fn=get_image_info, inputs=[input_image_component, aspect_ratio_input], outputs=[image_dim_output], queue=False)
     
     ui_inputs = [
         input_image_component, prompt_input, steps_slider,
         negative_prompt_input, duration_seconds_input,
-        guidance_scale_input, guidance_scale_2_input, seed_input, randomize_seed_checkbox
+        guidance_scale_input, guidance_scale_2_input, seed_input, randomize_seed_checkbox,
+        aspect_ratio_input # تم إضافة نسبة الأبعاد إلى المدخلات
     ]
     generate_button.click(fn=generate_video, inputs=ui_inputs, outputs=[video_output, seed_input])
 
