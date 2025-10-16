@@ -74,7 +74,7 @@ aoti.aoti_blocks_load(pipe.transformer_2, 'zerogpu-aoti/Wan2', variant='fp8da')
 
 
 default_prompt_i2v = "make this image come alive, cinematic motion, smooth animation"
-default_negative_prompt = "$$\text{blurry, low-res, low quality, bad anatomy, bad hands, missing limbs, extra fingers, mutated hands, deformed, disfigured, text, watermark, jpeg artifacts, tiling, duplicate, ugly}$$"
+default_negative_prompt = "$$\text blurry, low-res, low quality, bad anatomy, bad hands, missing limbs, extra fingers, mutated hands, deformed, disfigured, text, watermark, jpeg artifacts, tiling, duplicate, ugly}$$"
 
 def resize_image(image: Image.Image) -> Image.Image:
     """
