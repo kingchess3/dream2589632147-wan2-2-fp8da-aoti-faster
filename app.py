@@ -1,6 +1,6 @@
 import spaces
 import torch
-import time # تم إضافة مكتبة الوقت لقياس زمن التوليد (احترافي)
+import time
 from diffusers.pipelines.wan.pipeline_wan_i2v import WanImageToVideoPipeline
 from diffusers.models.transformers.transformer_wan import WanTransformer3DModel
 from diffusers.utils.export_utils import export_to_video
@@ -29,7 +29,7 @@ MAX_SEED = np.iinfo(np.int32).max
 
 FIXED_FPS = 16
 MIN_FRAMES_MODEL = 8
-MAX_FRAMES_MODEL = 80
+MAX_FRAMES_MODEL = 112 # القيمة الجديدة لـ 7 ثوانٍ (7 * 16 = 112)
 
 MIN_DURATION = round(MIN_FRAMES_MODEL/FIXED_FPS,1)
 MAX_DURATION = round(MAX_FRAMES_MODEL/FIXED_FPS,1)
@@ -75,7 +75,6 @@ aoti.aoti_blocks_load(pipe.transformer_2, 'zerogpu-aoti/Wan2', variant='fp8da')
 
 
 default_prompt_i2v = "make this image come alive, cinematic motion, smooth animation"
-# تم تنظيف الموجه السلبي من ترميز LaTeX
 default_negative_prompt = "blurry, low-res, low quality, bad anatomy, bad hands, missing limbs, extra fingers, mutated hands, deformed, disfigured, text, watermark, jpeg artifacts, tiling, duplicate, ugly"
 
 def resize_image(image: Image.Image) -> Image.Image:
@@ -146,7 +145,6 @@ def get_duration(
 ):
     BASE_FRAMES_HEIGHT_WIDTH = 81 * 832 * 624
     BASE_STEP_DURATION = 15
-    # يجب التأكد من أن input_image ليس None قبل محاولة تغيير الحجم
     if input_image is None:
         return 0
         
@@ -176,7 +174,7 @@ def generate_video(
     if input_image is None:
         raise gr.Error("Please upload an input image.")
     
-    start_time = time.time() # احترافي: بدء قياس الوقت
+    start_time = time.time()
 
     num_frames = get_num_frames(duration_seconds)
     current_seed = random.randint(0, MAX_SEED) if randomize_seed else int(seed)
@@ -196,10 +194,8 @@ def generate_video(
             generator=torch.Generator(device="cuda").manual_seed(current_seed),
         ).frames[0]
     except torch.cuda.OutOfMemoryError:
-        # معالجة احترافية: خطأ نفاد ذاكرة GPU
         raise gr.Error("Error: GPU memory exhausted (Out of Memory). Try reducing duration or image size.")
     except Exception as e:
-        # معالجة احترافية: أي خطأ آخر غير متوقع
         raise gr.Error(f"An unexpected error occurred during generation: {e}")
 
     with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmpfile:
@@ -207,20 +203,17 @@ def generate_video(
 
     export_to_video(output_frames_list, video_path, fps=FIXED_FPS)
     
-    # === التعديلات الاحترافية لإدارة الذاكرة ===
+    # إدارة الذاكرة
     del output_frames_list
     torch.cuda.empty_cache()
     gc.collect()
-    # ========================================
 
-    end_time = time.time() # احترافي: إنهاء قياس الوقت
+    end_time = time.time()
     duration_str = f"Video generated in {end_time - start_time:.2f} seconds. Seed used: {current_seed}"
     print(duration_str)
     
-    # يمكن إرجاع رسالة النجاح أو وقت التوليد مع الفيديو
     return video_path, current_seed
 
-# دالة مساعدة لعملية تغيير الحجم للإظهار في الواجهة
 def get_image_info(image):
     if image is None:
         return "", ""
@@ -234,11 +227,12 @@ with gr.Blocks() as demo:
         with gr.Column():
             input_image_component = gr.Image(type="pil", label="Input Image")
             
-            # احترافي: عرض أبعاد الصورة بعد تغيير الحجم
             image_dim_output = gr.Textbox(label="Target Dimensions (W x H)", value="", interactive=False)
             
+            # تم تعديل القيمة الافتراضية والحد الأقصى للمنظم لتشمل 7 ثوانٍ
+            duration_seconds_input = gr.Slider(minimum=MIN_DURATION, maximum=MAX_DURATION, step=0.1, value=7.0, label="Duration (seconds)", info=f"Clamped to model's {MIN_FRAMES_MODEL}-{MAX_FRAMES_MODEL} frames at {FIXED_FPS}fps.")
+            
             prompt_input = gr.Textbox(label="Prompt", value=default_prompt_i2v)
-            duration_seconds_input = gr.Slider(minimum=MIN_DURATION, maximum=MAX_DURATION, step=0.1, value=3.5, label="Duration (seconds)", info=f"Clamped to model's {MIN_FRAMES_MODEL}-{MAX_FRAMES_MODEL} frames at {FIXED_FPS}fps.")
             
             with gr.Accordion("Advanced Settings", open=False):
                 negative_prompt_input = gr.Textbox(label="Negative Prompt", value=default_negative_prompt, lines=3)
@@ -253,10 +247,6 @@ with gr.Blocks() as demo:
         with gr.Column():
             video_output = gr.Video(label="Generated Video", autoplay=True, interactive=False)
             
-            # احترافي: عرض معلومات التوليد (الوقت والبذرة)
-            # تم دمج هذه المخرجات في دالة generate_video
-            
-    # ربط حدث تحميل الصورة بعرض الأبعاد
     input_image_component.change(fn=get_image_info, inputs=[input_image_component], outputs=[image_dim_output])
     
     ui_inputs = [
@@ -264,7 +254,6 @@ with gr.Blocks() as demo:
         negative_prompt_input, duration_seconds_input,
         guidance_scale_input, guidance_scale_2_input, seed_input, randomize_seed_checkbox
     ]
-    # يتم تحديث مُخرج video_output و seed_input
     generate_button.click(fn=generate_video, inputs=ui_inputs, outputs=[video_output, seed_input])
 
     gr.Examples(
