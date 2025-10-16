@@ -74,7 +74,8 @@ aoti.aoti_blocks_load(pipe.transformer_2, 'zerogpu-aoti/Wan2', variant='fp8da')
 
 
 default_prompt_i2v = "make this image come alive, cinematic motion, smooth animation"
-default_negative_prompt = "$$\text blurry, low-res, low quality, bad anatomy, bad hands, missing limbs, extra fingers, mutated hands, deformed, disfigured, text, watermark, jpeg artifacts, tiling, duplicate, ugly}$$"
+# تم تعديل الموجه السلبي لإزالة ترميز LaTeX غير الضروري
+default_negative_prompt = "blurry, low-res, low quality, bad anatomy, bad hands, missing limbs, extra fingers, mutated hands, deformed, disfigured, text, watermark, jpeg artifacts, tiling, duplicate, ugly"
 
 def resize_image(image: Image.Image) -> Image.Image:
     """
@@ -227,6 +228,12 @@ def generate_video(
         video_path = tmpfile.name
 
     export_to_video(output_frames_list, video_path, fps=FIXED_FPS)
+
+    # === التعديلات الاحترافية لإدارة الذاكرة ===
+    del output_frames_list
+    torch.cuda.empty_cache()
+    gc.collect()
+    # ========================================
 
     return video_path, current_seed
 
