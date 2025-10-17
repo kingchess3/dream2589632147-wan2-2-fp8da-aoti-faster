@@ -425,5 +425,5 @@ with gr.Blocks() as demo:
         outputs=[usage_counter_output]
     )
 
-if __name__ == "__main__":
+if __name__ == "__main__": 
     demo.queue().launch(mcp_server=True)
