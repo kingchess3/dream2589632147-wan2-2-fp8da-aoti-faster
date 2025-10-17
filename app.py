@@ -1,4 +1,4 @@
-import spaces 
+import spaces
 import torch
 import time
 from diffusers.pipelines.wan.pipeline_wan_i2v import WanImageToVideoPipeline
