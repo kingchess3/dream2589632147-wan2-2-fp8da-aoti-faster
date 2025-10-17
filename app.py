@@ -17,6 +17,15 @@ from torchao.quantization import Int8WeightOnlyConfig
 
 import aoti
 
+# --- مكتبات العداد ---
+import os
+from huggingface_hub import HfApi, HfFileSystem
+import json
+
+# --- ثوابت العداد ---
+COUNTER_FILE = "counter.json"
+# ----------------------
+
 
 MODEL_ID = "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
 
@@ -88,6 +97,81 @@ aoti.aoti_blocks_load(pipe.transformer_2, 'zerogpu-aoti/Wan2', variant='fp8da')
 default_prompt_i2v = "make this image come alive, cinematic motion, smooth animation"
 default_negative_prompt = "blurry, low-res, low quality, bad anatomy, bad hands, missing limbs, extra fingers, mutated hands, deformed, disfigured, text, watermark, jpeg artifacts, tiling, duplicate, ugly"
 
+# =========================================================================
+#                   وظائف عداد الاستخدام الجديدة
+# =========================================================================
+
+def get_repo_id():
+    """يحصل على معرّف الريبو الحالي من متغير البيئة."""
+    # المتغير HF_SPACE_ID متاح تلقائيًا في Hugging Face Spaces
+    return os.environ.get("HF_SPACE_ID")
+
+def get_current_count():
+    """قراءة العداد من الملف على الهاب."""
+    repo_id = get_repo_id()
+    if not repo_id:
+        # إذا لم يكن في Space (مثلاً، تشغيل محلي)، عد من 0
+        return 0 
+
+    try:
+        fs = HfFileSystem()
+        # مسار الملف يكون spaces/owner/spacename/counter.json
+        if fs.exists(f"spaces/{repo_id}/{COUNTER_FILE}"):
+            with fs.open(f"spaces/{repo_id}/{COUNTER_FILE}", "r") as f:
+                data = json.load(f)
+                return data.get("count", 0)
+        else:
+            return 0 # الملف غير موجود بعد
+    except Exception as e:
+        print(f"Error reading counter: {e}")
+        return 0
+
+def increment_and_save_count():
+    """زيادة العداد وحفظه في الملف على الهاب."""
+    repo_id = get_repo_id()
+    if not repo_id:
+        print("Warning: HF_SPACE_ID not found. Cannot save counter permanently.")
+        return 1 # لا يمكن حفظه، لكن قم بالعد محلياً لمرة واحدة
+
+    current_count = get_current_count()
+    new_count = current_count + 1
+
+    try:
+        # مفتاح HF_TOKEN مطلوب هنا بصلاحية 'Write'
+        api = HfApi()
+
+        # كتابة العداد إلى ملف مؤقت
+        with tempfile.NamedTemporaryFile("w+", delete=False, encoding="utf-8") as tmpfile:
+            json.dump({"count": new_count}, tmpfile)
+            temp_path = tmpfile.name
+        
+        # رفع الملف المؤقت إلى الـ Space
+        api.upload_file(
+            path_or_fileobj=temp_path,
+            path_in_repo=COUNTER_FILE,
+            repo_id=repo_id,
+            repo_type="space",
+            commit_message=f"Increment usage count to {new_count}"
+        )
+        os.remove(temp_path)
+        print(f"Usage count incremented and saved: {new_count}")
+        return new_count
+    except Exception as e:
+        print(f"Error saving counter (Check HF_TOKEN Write permission): {e}")
+        return current_count + 1 # إرجاع القيمة التي حاول الوصول إليها
+
+def load_initial_count():
+    """تهيئة القيمة الأولية للعداد في الواجهة."""
+    return get_current_count()
+
+def update_counter_display(count):
+    """وظيفة لعرض العداد في الواجهة."""
+    return f"Total videos generated: {count}"
+
+# =========================================================================
+#                       باقي وظائف التطبيق
+# =========================================================================
+
 def resize_image(image: Image.Image, target_ratio_key: str = DEFAULT_RATIO_KEY) -> Image.Image:
     """
     Resizes and crops an image to fit the model's constraints and the target aspect ratio,
@@ -156,7 +240,7 @@ def get_duration(
     guidance_scale_2,
     seed,
     randomize_seed,
-    aspect_ratio_key, # تم إضافة النسبة
+    aspect_ratio_key,
     progress,
 ):
     BASE_FRAMES_HEIGHT_WIDTH = 81 * 832 * 624
@@ -181,14 +265,17 @@ def generate_video(
     guidance_scale_2 = 1,    
     seed = 42,
     randomize_seed = False,
-    aspect_ratio_key = DEFAULT_RATIO_KEY, # تم إضافة النسبة
+    aspect_ratio_key = DEFAULT_RATIO_KEY,
     progress=gr.Progress(track_tqdm=True),
 ):
     """
-    Generate a video from an input image using the Wan 2.2 14B I2V model with Lightning LoRA.
+    Generate a video from an input image and increments the usage counter.
     """
     if input_image is None:
         raise gr.Error("Please upload an input image.")
+    
+    # 💥 زيادة العداد أولاً 💥
+    usage_count = increment_and_save_count()
     
     start_time = time.time()
 
@@ -230,7 +317,8 @@ def generate_video(
     duration_str = f"Video generated in {end_time - start_time:.2f} seconds. Seed used: {current_seed}"
     print(duration_str)
     
-    return video_path, current_seed
+    # 💥 إرجاع العداد الجديد لتحديث الواجهة 💥
+    return video_path, current_seed, usage_count 
 
 def get_image_info(image, aspect_ratio_key):
     if image is None:
@@ -239,10 +327,22 @@ def get_image_info(image, aspect_ratio_key):
     resized_image = resize_image(image, aspect_ratio_key)
     return f"{resized_image.width}x{resized_image.height}"
 
+# =========================================================================
+#                       واجهة Gradio
+# =========================================================================
 
 with gr.Blocks() as demo:
     gr.Markdown("# Fast 4 steps Wan 2.2 I2V (14B) with Lightning LoRA")
     gr.Markdown("run Wan 2.2 in just 4-8 steps, with [Lightning LoRA](https://huggingface.co/Kijai/WanVideo_comfy/tree/main/Wan22-Lightning), fp8 quantization & AoT compilation - compatible with 🧨 diffusers and ZeroGPU⚡️")
+    
+    # --- مكون عرض العداد (تتم تهيئته عند بدء التشغيل) ---
+    usage_counter_output = gr.Textbox(
+        label="Space Usage Statistics", 
+        value=update_counter_display(load_initial_count()), # عرض القيمة الأولية
+        interactive=False,
+        elem_id="usage_counter"
+    )
+    
     with gr.Row():
         with gr.Column():
             input_image_component = gr.Image(type="pil", label="Input Image")
@@ -285,7 +385,17 @@ with gr.Blocks() as demo:
         guidance_scale_input, guidance_scale_2_input, seed_input, randomize_seed_checkbox,
         aspect_ratio_input # تم إضافة نسبة الأبعاد إلى المدخلات
     ]
-    generate_button.click(fn=generate_video, inputs=ui_inputs, outputs=[video_output, seed_input])
+    
+    # ربط زر التوليد بالدالة وتحديث العداد
+    generate_button.click(
+        fn=generate_video, 
+        inputs=ui_inputs, 
+        outputs=[video_output, seed_input, usage_counter_output]
+    ).then(
+        fn=update_counter_display, # وظيفة تأخذ قيمة العداد (الإخراج الثالث من generate_video)
+        inputs=[usage_counter_output], # وتضعها في نفس خانة الـ Textbox
+        outputs=[usage_counter_output]
+    )
 
     gr.Examples(
         examples=[ 
@@ -305,7 +415,14 @@ with gr.Blocks() as demo:
                 6,
             ],
         ],
-        inputs=[input_image_component, prompt_input, steps_slider], outputs=[video_output, seed_input], fn=generate_video, cache_examples="lazy"
+        inputs=[input_image_component, prompt_input, steps_slider], outputs=[video_output, seed_input, usage_counter_output], fn=generate_video, cache_examples="lazy"
+    )
+    
+    # تحديث العداد دورياً لضمان عرض أحدث قيمة في حال قام مستخدم آخر بالتوليد
+    demo.load(fn=load_initial_count, inputs=None, outputs=usage_counter_output, every=30).then(
+        fn=update_counter_display,
+        inputs=[usage_counter_output],
+        outputs=[usage_counter_output]
     )
 
 if __name__ == "__main__":
