@@ -10,4 +10,4 @@ pinned: true
 short_description: generate a video from an image with a text prompt
 ---
 
-Check out the configuration reference at https://huggingface.co/docs/hub/spaces-config-reference
+Check out the configuration reference at https://huggingface.co/spaces/dream2589632147/wan2-2-fp8da-aoti-faster
